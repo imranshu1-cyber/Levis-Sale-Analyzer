@@ -191,10 +191,14 @@ def process(file_bytes):
     df['Store Name'] = df['Store Name'].astype(str).str.strip()
     df['CATEGORY'] = df['CATEGORY'].astype(str).str.strip()
     df = df[df['CATEGORY'] != 'NP']
+    if 'CLASS' in df.columns:
+        df['CLASS'] = df['CLASS'].astype(str).str.strip()
+        df = df[df['CLASS'] != 'NP']
 
     months = [m for m in MONTH_ORDER if m in df['Month'].unique()]
     stores = sorted(df['Store Name'].dropna().unique())
     cats = sorted(df['CATEGORY'].dropna().unique())
+    classes = sorted(df['CLASS'].dropna().unique()) if 'CLASS' in df.columns else []
 
     # SWC — Store-wise
     swc = df.pivot_table(index='Store Name', columns='Month', values='NET SOLD AMOUNT',
@@ -216,6 +220,11 @@ def process(file_bytes):
     cat_cont = (gt_cat / gt_cat['TOTAL']) if gt_cat['TOTAL'] else gt_cat * 0
     cat_month = df.pivot_table(index='CATEGORY', columns='Month', values='NET SOLD AMOUNT',
                                 aggfunc='sum').reindex(index=cats, columns=months).fillna(0)
+
+    # CLASS-wise (Jeans/Polos/Tees/etc.)
+    class_total = df.groupby('CLASS')['NET SOLD AMOUNT'].sum().sort_values(ascending=False) if classes else pd.Series(dtype=float)
+    class_store = df.pivot_table(index='Store Name', columns='CLASS', values='NET SOLD AMOUNT',
+                                  aggfunc='sum').fillna(0) if classes else pd.DataFrame()
 
     # Gender
     gdf = df[df['Gender'].notna()] if 'Gender' in df.columns else df.iloc[0:0]
@@ -248,12 +257,18 @@ def process(file_bytes):
     cutsize_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
     cutsize_waist = cutsize_waist.reindex([c for c in cutsize_order if c in cutsize_waist.index]).dropna()
 
-    return dict(swc=swc, grand=grand, months=months, stores=stores, cats=cats,
+    # Store-level raw sale slice for deep-dive (kept small: only needed columns)
+    keep_cols = [c for c in ['Store Name', 'Month', 'CATEGORY', 'CLASS', 'Gender',
+                              'NET SOLD AMOUNT', 'NET SOLD QTY', '_SizeType'] if c in df.columns]
+    raw_slim = df[keep_cols].copy()
+
+    return dict(swc=swc, grand=grand, months=months, stores=stores, cats=cats, classes=classes,
                 cwc=cwc, gt_cat=gt_cat, cat_cont=cat_cont, cat_month=cat_month,
                 gender_total=gender_total, gender_month=gender_month, gender_cat=gender_cat,
                 total_qty=total_qty, total_bills=total_bills, avg_bill=avg_bill,
                 size_total=size_total, size_month=size_month,
-                fullsize_waist=fullsize_waist, cutsize_waist=cutsize_waist)
+                fullsize_waist=fullsize_waist, cutsize_waist=cutsize_waist,
+                class_total=class_total, class_store=class_store, raw_slim=raw_slim)
 
 
 def build_excel(d):
@@ -352,7 +367,8 @@ for col, lbl, val, sub in [
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-tabs = st.tabs(["📈 Overview", "🏪 Store-wise", "📦 Category-wise", "📏 Size Analysis", "🚻 Gender-wise", "🤖 AI Strategy Summary"])
+tabs = st.tabs(["📈 Overview", "🏪 Store-wise", "📦 Category-wise", "📏 Size Analysis", "🚻 Gender-wise",
+                "🔥 Heatmap", "🔍 Store Deep Dive", "📊 Performance", "🤖 AI Strategy Summary"])
 
 # ══════════════════ TAB 1: OVERVIEW ══════════════════
 with tabs[0]:
@@ -451,6 +467,19 @@ with tabs[2]:
         fig6.update_layout(**chart_layout(400, "Category Contribution"), xaxis_range=[0, cat_sorted.max()*1.35])
         st.plotly_chart(fig6, use_container_width=True)
 
+    class_total = d['class_total']
+    if len(class_total):
+        st.markdown('<div class="section-title" style="margin-top:1rem">👖 Class-wise Sale (Jeans · Polos · Tees · Shorts...)</div>', unsafe_allow_html=True)
+        top_classes = class_total.nlargest(15).sort_values()
+        fig6b = go.Figure(go.Bar(
+            x=top_classes.values, y=top_classes.index, orientation='h',
+            marker=dict(color=top_classes.values, colorscale=BLUE_SEQ),
+            text=[f"₹{fmt_inr(v)}" for v in top_classes.values], textposition='outside',
+            textfont=dict(size=11, color='#1a0030', family='Inter'),
+        ))
+        fig6b.update_layout(**chart_layout(460, "Top Classes by Sale"), xaxis_range=[0, top_classes.max()*1.35])
+        st.plotly_chart(fig6b, use_container_width=True)
+
 # ══════════════════ TAB 4: SIZE ANALYSIS ══════════════════
 with tabs[3]:
     size_total, size_month = d['size_total'], d['size_month']
@@ -539,8 +568,185 @@ with tabs[4]:
         fig9.update_layout(**chart_layout(380, "Category Sale by Gender", xangle=-20), barmode='group')
         st.plotly_chart(fig9, use_container_width=True)
 
-# ══════════════════ TAB 6: AI STRATEGY SUMMARY ══════════════════
+# ══════════════════ TAB 6: HEATMAP ══════════════════
 with tabs[5]:
+    st.markdown('<div class="section-title">🔥 Sale Heatmap — Store × Category</div>', unsafe_allow_html=True)
+    hm = d['cwc'][cats].copy()
+    hm_nan = hm.replace(0, np.nan)
+    fig_hm = go.Figure(go.Heatmap(
+        z=hm_nan.values.tolist(), x=hm_nan.columns.tolist(), y=hm_nan.index.tolist(),
+        colorscale=[[0, '#fdf8ff'], [0.2, '#e9d8f8'], [0.5, '#c084fc'], [0.75, '#9333ea'], [1, '#581c87']],
+        text=[[f"₹{fmt_inr(v)}" if pd.notna(v) else "—" for v in row] for row in hm_nan.values.tolist()],
+        texttemplate="%{text}", textfont=dict(size=9, color='#1a0030'),
+        hoverongaps=False, colorbar=dict(title="Sale", tickfont=dict(color='#1a0030')),
+    ))
+    fig_hm.update_layout(
+        paper_bgcolor="rgba(255,255,255,1)", plot_bgcolor="rgba(245,240,255,0.5)",
+        font=dict(color="#1a0030", family="Inter", size=11), height=max(500, len(stores) * 22),
+        margin=dict(l=200, r=20, t=55, b=80),
+        title=dict(text="<b>Sale Heatmap: Store × Category</b>", font=dict(color='#1a0030', size=14, family='Plus Jakarta Sans')),
+        xaxis=dict(tickangle=-30, tickfont=dict(size=10, color='#1a0030')),
+        yaxis=dict(tickfont=dict(size=9, color='#1a0030'), autorange='reversed'),
+    )
+    st.plotly_chart(fig_hm, use_container_width=True)
+
+    if hm.values.max() > 0:
+        mi = np.unravel_index(hm.values.argmax(), hm.shape)
+        rt = hm.sum(axis=1).sort_values(); ct = hm.sum(axis=0).sort_values(ascending=False)
+        st.markdown(f"""<div style="background:#f8faff;border:1.5px solid #c7d7f9;border-radius:12px;padding:1rem 1.2rem;margin-top:.8rem">
+          <div style="font-size:.6rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1e40af;margin-bottom:.7rem">🔥 HEATMAP — KEY INSIGHTS</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem">
+            <div style="background:#f5f3ff;border-radius:8px;padding:.7rem;border-left:4px solid #7c3aed">
+              <div style="font-size:.65rem;font-weight:700;color:#4c1d95;margin-bottom:.3rem">🏆 HIGHEST COMBINATION</div>
+              <div style="font-size:.85rem;font-weight:800;color:#1a0030"><b>{short_store(hm.index[mi[0]])}</b> → {hm.columns[mi[1]]}</div>
+              <div style="font-size:.78rem;color:#4c1d95">₹{fmt_inr(hm.values[mi])}</div>
+            </div>
+            <div style="background:#f0fdf4;border-radius:8px;padding:.7rem;border-left:4px solid #16a34a">
+              <div style="font-size:.65rem;font-weight:700;color:#166534;margin-bottom:.3rem">📦 TOP 3 CATEGORIES</div>
+              <div style="font-size:.78rem;color:#1a0030">{"<br>".join([f"<b>{c}</b> — ₹{fmt_inr(v)}" for c, v in ct.head(3).items()])}</div>
+            </div>
+            <div style="background:#eff6ff;border-radius:8px;padding:.7rem;border-left:4px solid #1d4ed8">
+              <div style="font-size:.65rem;font-weight:700;color:#1e40af;margin-bottom:.3rem">🏆 BEST STORE</div>
+              <div style="font-size:.78rem;color:#1a0030"><b>{short_store(rt.index[-1])}</b> — ₹{fmt_inr(rt.values[-1])}</div>
+            </div>
+            <div style="background:#fef2f2;border-radius:8px;padding:.7rem;border-left:4px solid #dc2626">
+              <div style="font-size:.65rem;font-weight:700;color:#991b1b;margin-bottom:.3rem">⚠️ WEAKEST STORE</div>
+              <div style="font-size:.78rem;color:#1a0030"><b>{short_store(rt.index[0])}</b> — ₹{fmt_inr(rt.values[0])}</div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+# ══════════════════ TAB 7: STORE DEEP DIVE ══════════════════
+with tabs[6]:
+    st.markdown('<div class="section-title">🔍 Store Deep Dive</div>', unsafe_allow_html=True)
+    raw_slim = d['raw_slim']
+    dd_store = st.selectbox("Select Store", stores, key="dd_store_levis")
+    if dd_store:
+        ss_df = raw_slim[raw_slim['Store Name'] == dd_store]
+        ts = ss_df['NET SOLD AMOUNT'].sum()
+        tq = ss_df['NET SOLD QTY'].sum()
+        rank = int(swc['Total Sale'].rank(ascending=False)[dd_store])
+        cont = ts / grand if grand else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        for col, lbl, val, sub in [
+            (m1, "Total Sale", f"₹{fmt_inr(ts)}", f"{len(months)} months"),
+            (m2, "Total Qty", f"{fmt_inr(tq)}", "units sold"),
+            (m3, "Contribution", pct(cont, 4), "of total sale"),
+            (m4, "Store Rank", f"#{rank}", f"out of {len(stores)} stores"),
+        ]:
+            with col:
+                st.markdown(f"""<div class="kpi-card"><div class="kpi-label">{lbl}</div>
+                    <div class="kpi-value">{val}</div><div class="kpi-sub">{sub}</div></div>""", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        mon_opts = ["All Months"] + months
+        sel_mon = st.radio("📅 Select Month", mon_opts, horizontal=True, key=f"dd_mon_levis_{dd_store}")
+        ss_filter = ss_df if sel_mon == "All Months" else ss_df[ss_df['Month'] == sel_mon]
+        title_suffix = " — All Months" if sel_mon == "All Months" else f" — {sel_mon}"
+
+        d1, d2 = st.columns([3, 2])
+        with d1:
+            mm = ss_df.groupby('Month')['NET SOLD AMOUNT'].sum().reindex(months).fillna(0)
+            bar_clrs = ['#9c27b0'] * len(months)
+            if sel_mon != "All Months":
+                bar_clrs = ['#f3e5f5'] * len(months)
+                bar_clrs[months.index(sel_mon)] = '#6a1b9a'
+            fig_dm = go.Figure(go.Bar(x=months, y=mm.values,
+                marker=dict(color=bar_clrs, line=dict(width=0)),
+                text=[f"₹{fmt_inr(v)}" if v > 0 else "" for v in mm.values],
+                textposition='outside', textfont=dict(size=10, color='#1a0030')))
+            fig_dm.update_layout(**chart_layout(280, f"{short_store(dd_store)} — Monthly Sale"), bargap=0.3)
+            st.plotly_chart(fig_dm, use_container_width=True)
+        with d2:
+            cd = ss_filter.groupby('CATEGORY')['NET SOLD AMOUNT'].sum(); cd = cd[cd > 0]
+            if len(cd):
+                fig_dp = go.Figure(go.Pie(labels=cd.index.tolist(), values=cd.values.tolist(), hole=0.48,
+                    marker=dict(colors=CAT_COLORS_LIGHT[:len(cd)], line=dict(color='#fff', width=2)),
+                    textinfo='label+percent', textfont=dict(size=11, color='#1a0030'),
+                    insidetextfont=dict(size=10, color='#fff')))
+                fig_dp.update_layout(**chart_layout(280, f"Category Mix{title_suffix}"))
+                st.plotly_chart(fig_dp, use_container_width=True)
+
+        d3, d4 = st.columns(2)
+        with d3:
+            if 'CLASS' in ss_filter.columns:
+                bd = ss_filter.groupby('CLASS')['NET SOLD AMOUNT'].sum().sort_values(ascending=False); bd = bd[bd > 0].head(8)
+                fig_db = go.Figure(go.Bar(x=bd.index.tolist(), y=bd.values.tolist(),
+                    marker=dict(color=CAT_COLORS_LIGHT[:len(bd)]),
+                    text=[f"₹{fmt_inr(v)}" for v in bd.values], textposition='outside'))
+                fig_db.update_layout(**chart_layout(280, f"Class Mix{title_suffix}", xangle=-30), bargap=0.3)
+                st.plotly_chart(fig_db, use_container_width=True)
+        with d4:
+            gd = ss_filter.groupby('Gender')['NET SOLD AMOUNT'].sum().sort_values(ascending=False) if 'Gender' in ss_filter.columns else pd.Series(dtype=float)
+            gd = gd[gd > 0]
+            if len(gd):
+                fig_dg = go.Figure(go.Pie(labels=gd.index.tolist(), values=gd.values.tolist(), hole=0.48,
+                    marker=dict(colors=GENDER_COLORS, line=dict(color='#fff', width=2)),
+                    textinfo='label+percent', textfont=dict(size=12, color='#1a0030'),
+                    insidetextfont=dict(size=10, color='#fff')))
+                fig_dg.update_layout(**chart_layout(280, f"Gender Mix{title_suffix}"))
+                st.plotly_chart(fig_dg, use_container_width=True)
+
+        if sel_mon != "All Months":
+            st.markdown(f'<div class="section-title" style="margin-top:1rem">📋 Full Detail — {sel_mon}</div>', unsafe_allow_html=True)
+            detail_cols = [c for c in ['CATEGORY', 'CLASS', 'Gender'] if c in ss_filter.columns]
+            detail = ss_filter.groupby(detail_cols)['NET SOLD AMOUNT'].sum().reset_index()
+            detail = detail[detail['NET SOLD AMOUNT'] > 0].sort_values('NET SOLD AMOUNT', ascending=False)
+            detail['NET SOLD AMOUNT'] = detail['NET SOLD AMOUNT'].apply(fmt_inr)
+            detail = detail.rename(columns={'NET SOLD AMOUNT': 'Sale'})
+            st.dataframe(detail, use_container_width=True, hide_index=True)
+
+# ══════════════════ TAB 8: PERFORMANCE ══════════════════
+with tabs[7]:
+    st.markdown('<div class="section-title">📊 Month-on-Month Growth</div>', unsafe_allow_html=True)
+    mall = swc[months].sum()
+    mom = mall.pct_change() * 100
+    mp = [float(v) for v in mom.values[1:]]
+    if mp:
+        fig_mom = go.Figure(go.Bar(x=months[1:], y=mp,
+            marker=dict(color=['#16a34a' if v >= 0 else '#dc2626' for v in mp]),
+            text=[f"{v:+.1f}%" for v in mp], textposition='outside', textfont=dict(size=12, color='#1a0030')))
+        fig_mom.update_layout(**chart_layout(340, "MoM Sale Growth (%) — All Stores"), bargap=0.3)
+        fig_mom.update_layout(yaxis=dict(gridcolor='#ede9fe', zeroline=True, zerolinecolor='#9c27b0', zerolinewidth=2))
+        st.plotly_chart(fig_mom, use_container_width=True)
+    else:
+        st.info("Need at least 2 months of data for MoM growth.")
+
+    p1, p2 = st.columns(2)
+    with p1:
+        st.markdown('<div class="section-title">🏆 Top 5 Stores</div>', unsafe_allow_html=True)
+        t5 = swc['Total Sale'].nlargest(5).sort_values()
+        fig_t5 = go.Figure(go.Bar(x=t5.values, y=[short_store(s) for s in t5.index], orientation='h',
+            marker=dict(color='#16a34a'), text=[f"₹{fmt_inr(v)}" for v in t5.values], textposition='outside'))
+        fig_t5.update_layout(**chart_layout(300, "Top 5 Stores"), xaxis_range=[0, t5.max() * 1.45])
+        st.plotly_chart(fig_t5, use_container_width=True)
+    with p2:
+        st.markdown('<div class="section-title">🔴 Bottom 5 Stores</div>', unsafe_allow_html=True)
+        b5 = swc['Total Sale'].nsmallest(5).sort_values(ascending=False)
+        fig_b5 = go.Figure(go.Bar(x=b5.values, y=[short_store(s) for s in b5.index], orientation='h',
+            marker=dict(color='#dc2626'), text=[f"₹{fmt_inr(v)}" for v in b5.values], textposition='outside'))
+        fig_b5.update_layout(**chart_layout(300, "Bottom 5 Stores"), xaxis_range=[0, b5.max() * 1.55])
+        st.plotly_chart(fig_b5, use_container_width=True)
+
+    st.markdown('<div class="section-title" style="margin-top:1rem">❌ Zero Sale Months — Store-wise</div>', unsafe_allow_html=True)
+    zr = []
+    for sn in swc.index:
+        row = swc.loc[sn, months]
+        zm = [months[i] for i, v in enumerate(row.values) if v == 0]
+        sm = [months[i] for i, v in enumerate(row.values) if v > 0]
+        if zm:
+            last = float(row.values[-1]); prev = float(row.values[-2]) if len(row.values) > 1 else 0
+            g = f"{'▲' if last >= prev else '▼'} {abs((last - prev) / prev * 100):.1f}%" if prev > 0 else "N/A"
+            zr.append({'Store': short_store(sn), 'Sale Months': ', '.join(sm), 'Zero Months': ', '.join(zm),
+                       'Zero Count': len(zm), 'Growth': g, 'Total Sale': f"₹{fmt_inr(swc.loc[sn, 'Total Sale'])}"})
+    if zr:
+        st.dataframe(pd.DataFrame(zr).sort_values('Zero Count', ascending=False), use_container_width=True, hide_index=True)
+    else:
+        st.success("✅ No zero-sale months — every store sold every month!")
+
+# ══════════════════ TAB 9: AI STRATEGY SUMMARY ══════════════════
+with tabs[8]:
     st.markdown('<div class="section-title">🤖 AI Strategy Summary</div>', unsafe_allow_html=True)
     st.markdown("""<div style="background:linear-gradient(135deg,#3a0068,#6a1b9a);border-radius:12px;
         padding:1rem 1.4rem;margin-bottom:1rem;color:#fff">
