@@ -383,8 +383,30 @@ with tabs[0]:
         hovertemplate='<b>%{x}</b><br>Sale: ₹%{y:,.0f}<extra></extra>',
     ))
     fig.update_layout(**chart_layout(380, "Monthly Sale — All Levi's Stores Combined"),
-                       bargap=0.3, yaxis_range=[0, monthly.max() * 1.22])
+                       bargap=0.3, yaxis_range=[0, monthly.max() * 1.22],
+                       annotations=[
+                           dict(x=months[best_idx], y=monthly.values[best_idx] * 1.15, text="🏆 Best", showarrow=False, font=dict(color='#16a34a', size=11)),
+                           dict(x=months[worst_idx], y=monthly.values[worst_idx] * 1.15, text="⬇ Low", showarrow=False, font=dict(color='#dc2626', size=11)),
+                       ])
     st.plotly_chart(fig, use_container_width=True)
+
+    avg_m = monthly.mean()
+    growth = ((monthly.values[-1] - monthly.values[0]) / monthly.values[0] * 100) if monthly.values[0] > 0 else 0
+    i1, i2, i3, i4 = st.columns(4)
+    for col, lbl, val, sub in [
+        (i1, "📈 Best Month", months[best_idx], f"₹{fmt_inr(monthly.values[best_idx])}"),
+        (i2, "📉 Lowest Month", months[worst_idx], f"₹{fmt_inr(monthly.values[worst_idx])}"),
+        (i3, "📊 Avg Monthly", f"₹{fmt_inr(avg_m)}", "Per month average"),
+        (i4, f"🚀 {months[0]}→{months[-1]}", f"{growth:+.1f}%", "Growth trend"),
+    ]:
+        with col:
+            st.markdown(f"""<div style="background:#fff;border-radius:12px;padding:.9rem 1.1rem;
+                box-shadow:0 2px 10px rgba(106,27,154,.1);border-left:4px solid #9c27b0">
+                <div style="font-size:.58rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#6a1b9a">{lbl}</div>
+                <div style="font-size:1.25rem;font-weight:800;color:#1a0030;margin:.2rem 0">{val}</div>
+                <div style="font-size:.72rem;color:#607d9b">{sub}</div>
+            </div>""", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
     ca, cb = st.columns(2)
     with ca:
@@ -400,22 +422,46 @@ with tabs[0]:
         fig2.update_layout(**chart_layout(420, "Top 10 Stores by Sale"), xaxis_range=[0, top10.max() * 1.35])
         st.plotly_chart(fig2, use_container_width=True)
     with cb:
-        st.markdown('<div class="section-title">🏷️ Category Mix</div>', unsafe_allow_html=True)
-        fig3 = go.Figure(go.Pie(
-            labels=cats, values=gt_cat[cats].values, hole=0.52,
-            marker=dict(colors=CAT_COLORS_LIGHT[:len(cats)], line=dict(color='#ffffff', width=3)),
-            textinfo='label+percent', textfont=dict(size=12, color='#1a0030', family='Inter'),
-            insidetextfont=dict(size=11, color='#ffffff'),
-            hovertemplate='<b>%{label}</b><br>₹%{value:,.0f}<br>%{percent}<extra></extra>',
+        st.markdown('<div class="section-title">📉 Bottom 10 Stores</div>', unsafe_allow_html=True)
+        bot10 = swc['Total Sale'].nsmallest(10).sort_values()
+        fig4 = go.Figure(go.Bar(
+            x=bot10.values, y=[short_store(s) for s in bot10.index], orientation='h',
+            marker=dict(color='#dc2626', line=dict(width=0)),
+            text=[f"₹{fmt_inr(v)}" for v in bot10.values], textposition='outside',
+            textfont=dict(size=12, color='#1a0030', family='Inter'),
+            hovertemplate='<b>%{y}</b><br>₹%{x:,.0f}<extra></extra>',
         ))
-        fig3.update_layout(**chart_layout(420, "Category-wise Sale Contribution"),
-                            annotations=[dict(text=f"<b>₹{fmt_inr(grand)}</b>", x=0.5, y=0.5,
-                                               font=dict(size=13, color='#1a0030', family='Plus Jakarta Sans'), showarrow=False)])
-        st.plotly_chart(fig3, use_container_width=True)
+        fig4.update_layout(**chart_layout(420, "Bottom 10 Stores by Sale"), xaxis_range=[0, bot10.max() * 1.45])
+        st.plotly_chart(fig4, use_container_width=True)
+
+    st.markdown('<div class="section-title" style="margin-top:1rem">🏷️ Category Mix</div>', unsafe_allow_html=True)
+    fig3 = go.Figure(go.Pie(
+        labels=cats, values=gt_cat[cats].values, hole=0.52,
+        marker=dict(colors=CAT_COLORS_LIGHT[:len(cats)], line=dict(color='#ffffff', width=3)),
+        textinfo='label+percent', textfont=dict(size=12, color='#1a0030', family='Inter'),
+        insidetextfont=dict(size=11, color='#ffffff'),
+        hovertemplate='<b>%{label}</b><br>₹%{value:,.0f}<br>%{percent}<extra></extra>',
+    ))
+    fig3.update_layout(**chart_layout(420, "Category-wise Sale Contribution"),
+                        annotations=[dict(text=f"<b>₹{fmt_inr(grand)}</b>", x=0.5, y=0.5,
+                                           font=dict(size=13, color='#1a0030', family='Plus Jakarta Sans'), showarrow=False)])
+    st.plotly_chart(fig3, use_container_width=True)
 
 # ══════════════════ TAB 2: STORE-WISE ══════════════════
 with tabs[1]:
-    st.markdown('<div class="section-title">🏪 Store-wise Sale Contribution (SWC)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🏪 Store-wise Monthly Sale</div>', unsafe_allow_html=True)
+    top5_default = swc['Total Sale'].nlargest(5).index.tolist()
+    sel_stores = st.multiselect("Select Stores", stores, default=top5_default, key="store_multiselect_levis")
+    if sel_stores:
+        fig_sw = go.Figure()
+        for i, sn in enumerate(sel_stores):
+            fig_sw.add_trace(go.Bar(x=months, y=swc.loc[sn, months].values, name=short_store(sn),
+                                     marker_color=CAT_COLORS_LIGHT[i % len(CAT_COLORS_LIGHT)],
+                                     hovertemplate=f'<b>{short_store(sn)}</b><br>%{{x}}: ₹%{{y:,.0f}}<extra></extra>'))
+        fig_sw.update_layout(**chart_layout(430, "Store-wise Monthly Sale"), barmode='group', bargap=0.12)
+        st.plotly_chart(fig_sw, use_container_width=True)
+
+    st.markdown('<div class="section-title" style="margin-top:1rem">📋 SWC Table</div>', unsafe_allow_html=True)
     disp = swc.copy()
     disp_fmt = disp.copy()
     for m in months: disp_fmt[m] = disp[m].apply(fmt_inr)
@@ -428,16 +474,6 @@ with tabs[1]:
     st.download_button("⬇ Download Full Report (Excel)", data=excel_buf,
                         file_name="Levis_Sale_Analyzer_Report.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    st.markdown('<div class="section-title" style="margin-top:1rem">📉 Bottom 10 Stores</div>', unsafe_allow_html=True)
-    bot10 = swc['Total Sale'].nsmallest(10).sort_values(ascending=False)
-    fig4 = go.Figure(go.Bar(
-        x=[short_store(s) for s in bot10.index], y=bot10.values,
-        marker=dict(color='#dc2626'), text=[f"₹{fmt_inr(v)}" for v in bot10.values], textposition='outside',
-        textfont=dict(size=11, color='#1a0030', family='Inter'),
-    ))
-    fig4.update_layout(**chart_layout(360, "Bottom 10 Stores by Sale", xangle=-35))
-    st.plotly_chart(fig4, use_container_width=True)
 
 # ══════════════════ TAB 3: CATEGORY-WISE ══════════════════
 with tabs[2]:
