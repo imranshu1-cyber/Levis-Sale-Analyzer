@@ -229,10 +229,31 @@ def process(file_bytes):
     total_bills = int(df['Trx'].sum()) if 'Trx' in df.columns else df['TRANSNUM'].nunique()
     avg_bill = grand / total_bills if total_bills else 0
 
+    # ── SIZE CLASSIFICATION — Full Size (numeric waist, e.g. denim) vs Cut Size (S/M/L/XL apparel) ──
+    size_type = pd.Series("Unclassified", index=df.index)
+    if 'WAIST' in df.columns:
+        waist_str = df['WAIST'].astype(str).str.strip()
+        is_numeric = pd.to_numeric(waist_str, errors='coerce').notna()
+        is_cutsize = waist_str.isin(['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'])
+        size_type = np.where(is_numeric, "Full Size", np.where(is_cutsize, "Cut Size", "Unclassified"))
+        size_type = pd.Series(size_type, index=df.index)
+    df['_SizeType'] = size_type
+
+    size_total = df[df['_SizeType'] != 'Unclassified'].groupby('_SizeType')['NET SOLD AMOUNT'].sum()
+    size_month = df[df['_SizeType'] != 'Unclassified'].pivot_table(
+        index='_SizeType', columns='Month', values='NET SOLD AMOUNT', aggfunc='sum'
+    ).reindex(columns=months).fillna(0)
+    fullsize_waist = df[df['_SizeType'] == 'Full Size'].groupby('WAIST')['NET SOLD AMOUNT'].sum().sort_values(ascending=False)
+    cutsize_waist = df[df['_SizeType'] == 'Cut Size'].groupby('WAIST')['NET SOLD AMOUNT'].sum()
+    cutsize_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
+    cutsize_waist = cutsize_waist.reindex([c for c in cutsize_order if c in cutsize_waist.index]).dropna()
+
     return dict(swc=swc, grand=grand, months=months, stores=stores, cats=cats,
                 cwc=cwc, gt_cat=gt_cat, cat_cont=cat_cont, cat_month=cat_month,
                 gender_total=gender_total, gender_month=gender_month, gender_cat=gender_cat,
-                total_qty=total_qty, total_bills=total_bills, avg_bill=avg_bill)
+                total_qty=total_qty, total_bills=total_bills, avg_bill=avg_bill,
+                size_total=size_total, size_month=size_month,
+                fullsize_waist=fullsize_waist, cutsize_waist=cutsize_waist)
 
 
 def build_excel(d):
@@ -292,18 +313,18 @@ def build_excel(d):
 # ══════════════════ HEADER ══════════════════
 st.markdown("""
 <div class="hero">
-    <div class="hero-badge">📊 MySmartWork</div>
+    <div class="hero-badge">LEVI'S ANALYZER</div>
     <div class="hero-divider"></div>
     <div class="hero-title">Levi's Sale Analyzer</div>
     <div class="hero-arrow">▸</div>
     <div style="flex:1; overflow:hidden;">
-        <div class="hero-sub-line">Store · Category · Gender-wise Sale Intelligence</div>
-        <div class="hero-sub">Upload your raw sale export & get instant insights</div>
+        <div class="hero-sub-line">Store · Category · Gender · Size · Cut Size</div>
+        <div class="hero-sub">Upload RAW sale export · Auto Reports · Interactive Dashboard</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-uploaded = st.file_uploader("Upload Levi's Sale Data (Excel — Sheet1 raw transaction export)", type=["xlsx", "xls"])
+uploaded = st.file_uploader("Upload Levi's RAW Sale Data (Excel — Sheet1 raw transaction export)", type=["xlsx", "xls"])
 
 if uploaded is None:
     st.info("👆 Upload the Levi's sale data Excel file to get started. Expected sheet: **Sheet1** with columns like `BRAND`, `Store Name`, `Month`, `CATEGORY`, `Gender`, `NET SOLD AMOUNT`, `NET SOLD QTY`.")
@@ -331,7 +352,7 @@ for col, lbl, val, sub in [
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-tabs = st.tabs(["📈 Overview", "🏪 Store-wise", "📦 Category-wise", "🚻 Gender-wise", "🤖 AI Strategy Summary"])
+tabs = st.tabs(["📈 Overview", "🏪 Store-wise", "📦 Category-wise", "📏 Size Analysis", "🚻 Gender-wise", "🤖 AI Strategy Summary"])
 
 # ══════════════════ TAB 1: OVERVIEW ══════════════════
 with tabs[0]:
@@ -430,8 +451,62 @@ with tabs[2]:
         fig6.update_layout(**chart_layout(400, "Category Contribution"), xaxis_range=[0, cat_sorted.max()*1.35])
         st.plotly_chart(fig6, use_container_width=True)
 
-# ══════════════════ TAB 4: GENDER-WISE ══════════════════
+# ══════════════════ TAB 4: SIZE ANALYSIS ══════════════════
 with tabs[3]:
+    size_total, size_month = d['size_total'], d['size_month']
+    fullsize_waist, cutsize_waist = d['fullsize_waist'], d['cutsize_waist']
+    if len(size_total) == 0:
+        st.info("Size (WAIST) data not available in this file.")
+    else:
+        st.markdown('<div class="section-title">📏 Full Size vs Cut Size Sale Split</div>', unsafe_allow_html=True)
+        ca, cb = st.columns(2)
+        with ca:
+            fig10 = go.Figure(go.Pie(
+                labels=size_total.index, values=size_total.values, hole=0.5,
+                marker=dict(colors=['#6a1b9a', '#f57f17'], line=dict(color='#ffffff', width=3)),
+                textinfo='label+percent', textfont=dict(size=14, color='#1a0030', family='Inter'),
+                insidetextfont=dict(size=13, color='#ffffff'),
+                hovertemplate='<b>%{label}</b><br>₹%{value:,.0f}<br>%{percent}<extra></extra>',
+            ))
+            fig10.update_layout(**chart_layout(380, "Full Size vs Cut Size — Total Sale"))
+            st.plotly_chart(fig10, use_container_width=True)
+        with cb:
+            st.markdown('<div class="section-title">📈 Monthly Trend</div>', unsafe_allow_html=True)
+            fig11 = go.Figure()
+            for i, s in enumerate(size_month.index):
+                fig11.add_trace(go.Bar(x=months, y=size_month.loc[s].values, name=s,
+                                        marker_color=['#6a1b9a', '#f57f17'][i % 2]))
+            fig11.update_layout(**chart_layout(380, "Size Type — Monthly Sale"), barmode='group')
+            st.plotly_chart(fig11, use_container_width=True)
+
+        st.markdown('<div class="section-title" style="margin-top:1rem">📐 Full Size — Waist-wise Sale (Denim/Bottoms)</div>', unsafe_allow_html=True)
+        if len(fullsize_waist):
+            fig12 = go.Figure(go.Bar(
+                x=[str(w) for w in fullsize_waist.index], y=fullsize_waist.values,
+                marker=dict(color=fullsize_waist.values, colorscale=BLUE_SEQ),
+                text=[f"₹{fmt_inr(v)}" for v in fullsize_waist.values], textposition='outside',
+                textfont=dict(size=11, color='#1a0030', family='Inter'),
+            ))
+            fig12.update_layout(**chart_layout(360, "Sale by Waist Size"))
+            st.plotly_chart(fig12, use_container_width=True)
+        else:
+            st.info("No Full Size (denim waist) data found.")
+
+        st.markdown('<div class="section-title" style="margin-top:1rem">👕 Cut Size — S/M/L/XL-wise Sale (Apparel)</div>', unsafe_allow_html=True)
+        if len(cutsize_waist):
+            fig13 = go.Figure(go.Bar(
+                x=cutsize_waist.index, y=cutsize_waist.values,
+                marker=dict(color='#e91e63'),
+                text=[f"₹{fmt_inr(v)}" for v in cutsize_waist.values], textposition='outside',
+                textfont=dict(size=12, color='#1a0030', family='Inter'),
+            ))
+            fig13.update_layout(**chart_layout(360, "Sale by Cut Size"))
+            st.plotly_chart(fig13, use_container_width=True)
+        else:
+            st.info("No Cut Size (S/M/L/XL) data found.")
+
+# ══════════════════ TAB 5: GENDER-WISE ══════════════════
+with tabs[4]:
     if len(gender_total) == 0:
         st.info("Gender data not available in this file.")
     else:
@@ -464,8 +539,8 @@ with tabs[3]:
         fig9.update_layout(**chart_layout(380, "Category Sale by Gender", xangle=-20), barmode='group')
         st.plotly_chart(fig9, use_container_width=True)
 
-# ══════════════════ TAB 5: AI STRATEGY SUMMARY ══════════════════
-with tabs[4]:
+# ══════════════════ TAB 6: AI STRATEGY SUMMARY ══════════════════
+with tabs[5]:
     st.markdown('<div class="section-title">🤖 AI Strategy Summary</div>', unsafe_allow_html=True)
     st.markdown("""<div style="background:linear-gradient(135deg,#3a0068,#6a1b9a);border-radius:12px;
         padding:1rem 1.4rem;margin-bottom:1rem;color:#fff">
